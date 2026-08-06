@@ -1,74 +1,70 @@
-# vLLM Scheduler Trace Lab
+# vLLM Scheduler Trace Lab（调度追踪实验）
 
-An evidence-driven study of vLLM v0.26 scheduling, KV-cache pressure, MRV2
-input preparation, and GPU execution on a 6 GiB RTX 2060 Laptop GPU.
+一个基于证据的 vLLM v0.26 调度研究项目，覆盖 KV Cache 压力、MRV2 输入准备
+以及 RTX 2060 Laptop 6 GiB GPU 上的执行行为。
 
-The project starts with step-level observability, finds a real waiting-queue
-head-of-line (HOL) blocking case, implements an opt-in bypass policy, and then
-uses counterexamples to reject the policy for upstream submission. The result
-is not a headline-only speedup: it is a reproducible systems investigation with
-positive results, regressions, and explicit evidence boundaries.
+项目从逐 step 可观测性出发，定位真实的 waiting 队列队头阻塞
+（head-of-line blocking，HOL），实现可选的 bypass 策略，再通过反例否决不安全的
+上游提交方案。最终结果不是一个只有漂亮数字的“加速”，而是一套包含正向收益、
+退化场景和明确证据边界的可复现系统实验。
 
-> Source implementation: [`Xiaoda11/vllm`, branch
-> `exp/mrv2-scheduler-trace`](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace)
-> at commit [`b27c09dd873de6fff45dc995138becf03288a92f`](https://github.com/Xiaoda11/vllm/commit/b27c09dd873de6fff45dc995138becf03288a92f).
+> 源码实现位于 [`Xiaoda11/vllm` 的
+> `exp/mrv2-scheduler-trace` 分支](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace)，
+> 精确提交为 [`b27c09dd873de6fff45dc995138becf03288a92f`](https://github.com/Xiaoda11/vllm/commit/b27c09dd873de6fff45dc995138becf03288a92f)。
 
-## System under study
+## 研究链路
 
 ```mermaid
 flowchart LR
-    W[Controlled token workloads] --> S[vLLM Scheduler]
+    W[精确 token workload] --> S[vLLM Scheduler]
     S --> K[KV Cache Manager]
     S --> O[SchedulerOutput]
-    O --> M[MRV2 input preparation]
-    M --> G[TRITON_ATTN and GPU kernels]
-    S -. step-level JSONL .-> E[Trace and benchmark analyzers]
-    K -. blocks, failures, preemption .-> E
-    M -. rows, mapping, shapes .-> E
-    G -. profiler and NCU .-> E
-    E --> D[Policy decision]
+    O --> M[MRV2 输入准备]
+    M --> G[TRITON_ATTN 与 GPU kernels]
+    S -. 逐 step JSONL .-> E[Trace 与 benchmark 分析器]
+    K -. blocks、失败与抢占 .-> E
+    M -. persistent rows、映射与 shapes .-> E
+    G -. profiler 与 NCU .-> E
+    E --> D[策略判断]
 ```
 
-The trace is disabled by default. When enabled, it records Scheduler state and
-existing CPU metadata without reading GPU tensors, calling `.item()`, or adding
-CUDA synchronization.
+Trace 默认关闭。开启后，它只记录 Scheduler 状态和已有的 CPU metadata，不读取
+GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
 
-## The problem
+## 问题是什么
 
-Under full-input reservation and a constrained 1,450-block KV pool, request B
-was at the FCFS queue head and needed about 1,024 blocks while only 933 were
-free. Request C, queued behind B, needed about 64 blocks and could have fit.
-The strict scheduler stopped scanning after B's allocation failure, so C waited
-roughly 33 seconds too.
+在 full-input reservation 和受限的 1,450-block KV pool 下，长请求 B 位于 FCFS
+队首，约需 1,024 blocks，但当时只有 933 blocks 空闲。排在 B 后面的短请求 C
+只需约 64 blocks，本可以被容纳；strict Scheduler 却在 B allocation failure 后
+停止扫描，导致 C 也等待了约 33 秒。
 
-The experimental policy allows a blocked head to be skipped and admits a later
-request. A bounded version permits at most one such admission for each blocked
-head. Both modes are opt-in; the default scheduler behavior is unchanged.
+实验策略允许暂时跳过被阻塞的队首请求，准入后续可容纳请求。bounded 版本进一步
+规定每个 blocked head 最多允许一次 bypass admission。两种模式都需要显式开启，
+默认 Scheduler 行为保持不变。
 
-## Results that changed the decision
+## 改变最终判断的实验结果
 
-| Experiment | Result | What it proves |
+| 实验 | 结果 | 说明 |
 |---|---:|---|
-| Repeated three-request gate | C TTFT median: **33.250 s → 0.182 s** | The HOL problem and local benefit are real |
-| Unbounded short-request burst | B first scheduled step: **517 → 587**; B TTFT **+10.0%** | Per-step retry is not a starvation bound |
-| Bounded long-lived burst | **3 new preemptions**, makespan **+1.21%**, throughput **-1.20%**, TTFT Jain **-10.64%** | Admission count does not bound KV lifetime |
-| Scheduler-aligned profile | strict: **20 single Decode**; bounded: **17 single + 1 mixed + 2 dual Decode** | The policy changes batch shape and kernel mix, not kernel code |
+| 三请求重复 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 问题和局部收益真实存在 |
+| 无界短请求 burst | B first scheduled step：**517 → 587**；B TTFT **+10.0%** | 逐 step 重试不是 starvation bound |
+| bounded 长生命周期 burst | **新增 3 次 preemption**，makespan **+1.21%**，throughput **-1.20%**，TTFT Jain **-10.64%** | admission count 无法限制 KV 生命周期 |
+| Scheduler 对齐 profile | strict：**20 个 single Decode**；bounded：**17 个 single + 1 个 mixed + 2 个 dual Decode** | 策略改变 batch shape 与 kernel 组合，而非 kernel 代码 |
 
-The final decision is **no upstream PR**. One-admission bounding limits how many
-requests bypass a blocked head, but not how long the admitted request occupies
-KV cache. A longer-lived request can therefore create later preemption and
-fairness regressions even when B's first scheduled step is unchanged.
+最终结论是：**不提交 upstream PR**。one-admission bound 只能限制绕过队首的请求
+数量，不能限制准入请求持有 KV Cache 的时间。因此即使 B 的首次调度 step 不变，
+长生命周期请求仍可能造成后续 preemption 和公平性退化。
 
-## GPU evidence
+## GPU 侧证据
 
-Nsight Systems on this WSL path exposed CUDA API activity but no reliable GPU
-kernel timeline. A scheduler-aligned PyTorch Profiler fallback associated steps
-60–79 with real CUDA work and found a bounded mixed step containing one Decode
-token plus a 1,024-token Prefill.
+当前 WSL 路径下的 Nsight Systems 能看到 CUDA API，但没有可靠的 GPU kernel
+timeline。项目使用与 Scheduler 对齐的 PyTorch Profiler fallback，将 step 60–79
+对应到真实 CUDA 工作，并观察到一个由 1 个 Decode token 和 1,024 个 Prefill
+tokens 组成的 bounded mixed step。
 
-A targeted Nsight Compute capture of a real Prefill GEMM reported:
+针对一个真实 Prefill GEMM 的 Nsight Compute 采集结果如下：
 
-| Metric | Value |
+| 指标 | 数值 |
 |---|---:|
 | Achieved occupancy | 24.67% |
 | L2 hit rate | 84.01% |
@@ -77,39 +73,39 @@ A targeted Nsight Compute capture of a real Prefill GEMM reported:
 | `math_pipe_throttle` stall | 61.85% |
 | `long_scoreboard` stall | 1.41% |
 
-This launch does not look like a simple DRAM-latency-bound kernel. Its grid was
-not uniquely aligned with the mixed Scheduler step, so the counters are treated
-as targeted microarchitectural evidence—not as end-to-end policy attribution.
+这个 launch 不呈现简单的 DRAM-latency-bound 特征。但它的 grid 尚未与 mixed
+Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchitecture
+证据，不用于端到端策略性能归因。
 
-## What was built
+## 项目实现
 
-- Opt-in Scheduler and MRV2 JSONL traces.
-- Exact-token workload generator with controlled arrivals and shared prefixes.
-- Trace-to-CSV, benchmark aggregation, and profiler-alignment analyzers.
-- Opt-in unbounded and one-admission waiting bypass variants.
-- Focused Scheduler, workload, trace, and analyzer tests.
-- Workloads covering 8K/16K Prefill, mixed Prefill/Decode, prefix-cache reuse,
-  allocation failure, preemption, and request-lifetime counterexamples.
+- 默认关闭的 Scheduler 与 MRV2 JSONL trace；
+- 支持精确 token、arrival time 和 shared prefix 的 workload generator；
+- trace-to-CSV、benchmark aggregate 与 profiler alignment 分析器；
+- 可选的无界与 one-admission waiting bypass；
+- Scheduler、workload、trace 和 analyzer 的针对性测试；
+- 覆盖 8K/16K Prefill、Prefill/Decode 混合、Prefix Cache 复用、allocation
+  failure、preemption 和请求生命周期反例的受控 workload。
 
-## Read and reproduce
+## 阅读与复现
 
-| Goal | Link |
+| 目标 | 入口 |
 |---|---|
-| Read the concise Chinese engineering report | [docs/report_zh.md](docs/report_zh.md) |
-| Inspect machine-readable benchmark results | [results/benchmark_summary.json](results/benchmark_summary.json) |
-| Inspect profiling results and boundaries | [results/profile_summary.json](results/profile_summary.json) |
-| Read the full report in the source fork | [full engineering report](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_final_report.md) |
-| Follow the complete reproduction matrix | [source reproduction guide](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/benchmarks/scheduler_trace/README.md) |
-| Inspect the implementation and tests | [source project overview](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_project_overview.md) |
+| 阅读中文工程报告 | [docs/report_zh.md](docs/report_zh.md) |
+| 查看可机器读取的 benchmark 结果 | [results/benchmark_summary.json](results/benchmark_summary.json) |
+| 查看 profiling 结果及证据边界 | [results/profile_summary.json](results/profile_summary.json) |
+| 阅读源码分支中的完整工程报告 | [完整报告](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_final_report.md) |
+| 执行完整复现矩阵 | [复现指南](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/benchmarks/scheduler_trace/README.md) |
+| 查看实现、测试与代码地图 | [源码项目概览](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_project_overview.md) |
 
-The source guide records exact commands, scenario configs, analyzers, and test
-entry points. Models, virtual environments, raw profiler reports, and large run
-directories are intentionally excluded from this showcase repository.
+源码复现指南保留了精确命令、scenario configs、分析器和测试入口。模型、虚拟
+环境、原始 profiler 报告和大体积运行目录不会复制到这个展示仓库。
 
-## Reproduction boundary
+## 复现与结论边界
 
-The measurements use vLLM v0.26.0, MRV2, `TRITON_ATTN`, Qwen2.5-0.5B-Instruct
-FP16, WSL2, and an RTX 2060 Laptop GPU. They do not establish behavior for
-multi-GPU serving, larger models, other attention backends, or CUDA Graph mode.
-Stable policy conclusions come from unprofiled repeated benchmarks; one-off
-profiler and NCU captures are used only to explain execution structure.
+实验固定使用 vLLM v0.26.0、MRV2、`TRITON_ATTN`、
+Qwen2.5-0.5B-Instruct FP16、WSL2 和 RTX 2060 Laptop GPU。结论不能直接外推到
+多 GPU serving、大模型、其他 attention backend 或 CUDA Graph 模式。
+
+稳定的策略判断来自无 profiler 的重复 benchmark；单次 profiler 与 NCU capture
+只用于解释执行结构。
