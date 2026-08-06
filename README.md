@@ -14,19 +14,7 @@
 
 ## 研究链路
 
-```mermaid
-flowchart LR
-    W[精确 token workload] --> S[vLLM Scheduler]
-    S --> K[KV Cache Manager]
-    S --> O[SchedulerOutput]
-    O --> M[MRV2 输入准备]
-    M --> G[TRITON_ATTN 与 GPU kernels]
-    S -. 逐 step JSONL .-> E[Trace 与 benchmark 分析器]
-    K -. blocks、失败与抢占 .-> E
-    M -. persistent rows、映射与 shapes .-> E
-    G -. profiler 与 NCU .-> E
-    E --> D[策略判断]
-```
+![vLLM Scheduler Trace Lab 研究链路](assets/research_path.svg)
 
 Trace 默认关闭。开启后，它只记录 Scheduler 状态和已有的 CPU metadata，不读取
 GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
