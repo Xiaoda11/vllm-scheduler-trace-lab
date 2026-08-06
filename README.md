@@ -14,7 +14,7 @@
 
 ## 研究链路
 
-![vLLM Scheduler Trace Lab 研究链路](assets/research_path.svg)
+![vLLM Scheduler Trace Lab 研究链路](assets/research_path.png)
 
 Trace 默认关闭。开启后，它只记录 Scheduler 状态和已有的 CPU metadata，不读取
 GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
