@@ -91,6 +91,10 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 
 | 目标 | 入口 |
 |---|---|
+| 从零复现实验 | [REPRODUCING.md](REPRODUCING.md) |
+| 理解 Trace 数据流与埋点 | [docs/trace_design.md](docs/trace_design.md) |
+| 核对验证证据与适用边界 | [docs/validation.md](docs/validation.md) |
+| 对照 Scheduler 与 MRV2 精简样例 | [examples/README.md](examples/README.md) |
 | 阅读中文工程报告 | [docs/report_zh.md](docs/report_zh.md) |
 | 查看可机器读取的 benchmark 结果 | [results/benchmark_summary.json](results/benchmark_summary.json) |
 | 查看 profiling 结果及证据边界 | [results/profile_summary.json](results/profile_summary.json) |

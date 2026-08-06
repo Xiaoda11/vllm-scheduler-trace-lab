@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "example_kind": "normalized_excerpt",
+  "source_run": "day8-s3-runner-flow-20260731",
+  "event": "scheduler_step",
+  "step_id": 5,
+  "token_budget": {
+    "initial": 2048,
+    "scheduled": 2048,
+    "remaining": 0
+  },
+  "queues": {
+    "running_before": ["A"],
+    "waiting_before": ["B"],
+    "running_after": ["A", "B"],
+    "waiting_after": [],
+    "skipped": []
+  },
+  "kv_cache": {
+    "block_size": 16,
+    "free_blocks_before": 16730,
+    "free_blocks_after": 16601,
+    "usage_before": 0.02969493098,
+    "usage_after": 0.03717666164
+  },
+  "requests": [
+    {
+      "request_id": "A",
+      "status_before": "RUNNING",
+      "status_after": "RUNNING",
+      "prompt_tokens": 8192,
+      "computed_tokens_before": 8192,
+      "computed_tokens_after": 8193,
+      "scheduled_tokens": 1,
+      "is_prefilling_after": false,
+      "block_table_blocks_before": 512,
+      "block_table_blocks_after": 513,
+      "block_table_blocks_added": 1
+    },
+    {
+      "request_id": "B",
+      "status_before": "WAITING",
+      "status_after": "RUNNING",
+      "prompt_tokens": 16384,
+      "computed_tokens_before": 0,
+      "computed_tokens_after": 2047,
+      "scheduled_tokens": 2047,
+      "is_prefilling_after": true,
+      "block_table_blocks_before": 0,
+      "block_table_blocks_after": 128,
+      "block_table_blocks_added": 128
+    }
+  ],
+  "events": {
+    "allocation_failures": [],
+    "preempted": [],
+    "finished": []
+  },
+  "normalization": [
+    "request UUID suffixes removed",
+    "block ID arrays replaced by counts",
+    "timestamps omitted"
+  ]
+}
+

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "example_kind": "normalized_excerpt",
+  "source_run": "day8-s3-runner-flow-20260731",
+  "step_id": 5,
+  "model_runner_batch": {
+    "request_ids": ["A", "B"],
+    "persistent_rows": [1, 0],
+    "num_scheduled_tokens": [1, 2047],
+    "num_reqs": 2,
+    "num_tokens": 2048,
+    "cudagraph_mode": "NONE"
+  },
+  "model_runner_inputs": {
+    "cpu_inputs": {
+      "is_prefilling": [false, true],
+      "num_computed_prefill_tokens": [8192, 0],
+      "num_computed_tokens": [8192, 0],
+      "prefill_len": [8192, 16384],
+      "query_start_loc": [0, 1, 2048]
+    },
+    "input_shapes": {
+      "idx_mapping": [2],
+      "query_start_loc": [3],
+      "input_ids": [2048],
+      "positions": [2048],
+      "seq_lens": [2],
+      "block_tables": [2, 2048],
+      "slot_mappings": [1, 2048]
+    },
+    "persistent_state_shapes": {
+      "all_token_ids": [2, 32768],
+      "block_tables": [2, 2048]
+    },
+    "attention_metadata_type": "TritonAttentionMetadata",
+    "attention_layers": 24
+  },
+  "invariant": {
+    "sum_num_scheduled_tokens": 2048,
+    "batch_num_tokens": 2048,
+    "query_start_loc_last": 2048
+  },
+  "normalization": [
+    "request UUID suffixes removed",
+    "tensor contents omitted",
+    "timestamps omitted"
+  ]
+}
+
