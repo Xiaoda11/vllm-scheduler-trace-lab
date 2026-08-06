@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "source_commit": "b27c09dd873de6fff45dc995138becf03288a92f",
+  "scheduler_aligned_profile": {
+    "tool": "PyTorch Profiler",
+    "scheduler_steps": {
+      "start": 60,
+      "end_inclusive": 79
+    },
+    "strict": {
+      "single_decode_steps": 20,
+      "mixed_prefill_decode_steps": 0,
+      "dual_decode_steps": 0,
+      "attention_calls": 480,
+      "gemm_calls": 0
+    },
+    "bounded": {
+      "single_decode_steps": 17,
+      "mixed_prefill_decode_steps": 1,
+      "dual_decode_steps": 2,
+      "attention_calls": 480,
+      "gemm_calls": 291,
+      "mixed_step_scheduled_tokens": 1025,
+      "mixed_step_composition": {
+        "decode_tokens": 1,
+        "prefill_tokens": 1024
+      }
+    },
+    "evidence_boundary": "One high-overhead window per mode; used for execution composition, not stable latency or throughput claims."
+  },
+  "targeted_ncu_launch": {
+    "kernel": "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_tn",
+    "duration_milliseconds": 2.03,
+    "sm_throughput_percent": 41.68,
+    "dram_throughput_percent": 25.84,
+    "l2_hit_rate_percent": 84.01,
+    "achieved_occupancy_percent": 24.67,
+    "registers_per_thread": 254,
+    "waves_per_sm": 20.27,
+    "warp_stall_percent": {
+      "math_pipe_throttle": 61.85,
+      "long_scoreboard": 1.41
+    },
+    "interpretation": "The targeted launch is not a simple DRAM-latency-bound case.",
+    "evidence_boundary": "The launch grid was not uniquely aligned with the mixed Scheduler step; do not use it for end-to-end policy attribution or extrapolate it to all Prefill kernels."
+  },
+  "nsight_systems": {
+    "kernel_timeline_available": false,
+    "observation": "CUDA API activity was visible, but reliable GPU kernel activity was unavailable on the tested WSL path."
+  }
+}

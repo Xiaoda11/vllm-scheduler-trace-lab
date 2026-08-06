@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "https://github.com/Xiaoda11/vllm",
+    "branch": "exp/mrv2-scheduler-trace",
+    "commit": "b27c09dd873de6fff45dc995138becf03288a92f",
+    "baseline_tag": "v0.26.0",
+    "baseline_commit": "f2654939e69b4069b13977e9aef3e31d4dcaf051"
+  },
+  "environment": {
+    "gpu": "RTX 2060 Laptop 6 GiB",
+    "os_path": "WSL2",
+    "model_runner": "MRV2",
+    "attention_backend": "TRITON_ATTN",
+    "model": "Qwen2.5-0.5B-Instruct FP16"
+  },
+  "experiments": {
+    "repeated_three_request_gate": {
+      "baseline_c_ttft_median_seconds": 33.250,
+      "modified_c_ttft_median_seconds": 0.182,
+      "baseline_b_first_scheduled_step": 517,
+      "modified_b_first_scheduled_step": 517,
+      "interpretation": "Repeatable local HOL benefit; not a lifetime safety bound."
+    },
+    "unbounded_short_request_burst": {
+      "baseline_b_first_scheduled_step": 517,
+      "modified_b_first_scheduled_step": 587,
+      "b_ttft_change_percent": 10.0,
+      "interpretation": "Per-step retry does not prevent head-request delay."
+    },
+    "bounded_long_lived_burst": {
+      "strict": {
+        "b_ttft_seconds": 31.229,
+        "c_ttft_median_seconds": 31.931,
+        "makespan_seconds": 52.603,
+        "output_throughput_tokens_per_second": 88.208,
+        "ttft_jain_index": 0.930977,
+        "preemptions": 0
+      },
+      "bounded": {
+        "b_ttft_seconds": 31.863,
+        "c_ttft_median_seconds": 32.142,
+        "makespan_seconds": 53.241,
+        "output_throughput_tokens_per_second": 87.150,
+        "ttft_jain_index": 0.831934,
+        "preemptions": 3
+      },
+      "relative_change_percent": {
+        "b_ttft": 2.03,
+        "c_ttft_median": 0.66,
+        "makespan": 1.21,
+        "output_throughput": -1.20,
+        "ttft_jain_index": -10.64
+      },
+      "interpretation": "One-admission bounding does not constrain the admitted request's KV lifetime."
+    }
+  },
+  "decision": {
+    "upstream_pr": false,
+    "reason": "Long-lived counterexample introduces preemption and fairness/throughput regressions; admission count is not a starvation or completion-time bound."
+  }
+}

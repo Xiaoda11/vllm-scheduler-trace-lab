@@ -1,0 +1,6 @@
+.DS_Store
+.venv/
+outputs/
+*.ncu-rep
+*.nsys-rep
+*.pt.trace.json
