@@ -1,5 +1,11 @@
 # vLLM Scheduler Trace Lab（调度追踪实验）
 
+> **版本状态（2026-09）**：本文主体仍是经过 GPU 实验验证的 **vLLM v0.26.0** 研究结果；
+> v0.26 源码现冻结在 [`exp/mrv2-scheduler-trace-v026`](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace-v026)。
+> 项目正在向 **vLLM v0.28.0** 做语义迁移，当前先迁移 observability/trace 基础设施并建立 CPU-only 验证契约，
+> **尚未把任何 v0.26 性能数字外推为 v0.28 结果**。迁移进度见
+> [v0.28 migration](docs/migration_v028.md)，版本与证据边界见 [version matrix](docs/version_matrix.md)。
+
 一个基于证据的 vLLM v0.26 调度研究项目，覆盖 KV Cache 压力、MRV2 输入准备
 以及 RTX 2060 Laptop 6 GiB GPU 上的执行行为。
 
@@ -8,9 +14,8 @@
 上游提交方案。最终结果不是一个只有漂亮数字的“加速”，而是一套包含正向收益、
 退化场景和明确证据边界的可复现系统实验。
 
-> 源码实现位于 [`Xiaoda11/vllm` 的
-> `exp/mrv2-scheduler-trace` 分支](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace)，
-> 精确提交为 [`b27c09dd873de6fff45dc995138becf03288a92f`](https://github.com/Xiaoda11/vllm/commit/b27c09dd873de6fff45dc995138becf03288a92f)。
+> v0.26 精确实验提交为
+> [`b27c09dd873de6fff45dc995138becf03288a92f`](https://github.com/Xiaoda11/vllm/commit/b27c09dd873de6fff45dc995138becf03288a92f)。
 
 ## 研究链路
 
@@ -79,6 +84,8 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 
 | 目标 | 入口 |
 |---|---|
+| 查看版本状态与证据边界 | [docs/version_matrix.md](docs/version_matrix.md) |
+| 跟踪 v0.28 迁移 | [docs/migration_v028.md](docs/migration_v028.md) |
 | 从零复现实验 | [REPRODUCING.md](REPRODUCING.md) |
 | 理解 Trace 数据流与埋点 | [docs/trace_design.md](docs/trace_design.md) |
 | 核对验证证据与适用边界 | [docs/validation.md](docs/validation.md) |
@@ -86,9 +93,9 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 | 阅读中文工程报告 | [docs/report_zh.md](docs/report_zh.md) |
 | 查看可机器读取的 benchmark 结果 | [results/benchmark_summary.json](results/benchmark_summary.json) |
 | 查看 profiling 结果及证据边界 | [results/profile_summary.json](results/profile_summary.json) |
-| 阅读源码分支中的完整工程报告 | [完整报告](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_final_report.md) |
-| 执行完整复现矩阵 | [复现指南](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/benchmarks/scheduler_trace/README.md) |
-| 查看实现、测试与代码地图 | [源码项目概览](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_project_overview.md) |
+| 阅读 v0.26 源码中的完整工程报告 | [完整报告](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace-v026/docs/scheduler_trace_lab_final_report.md) |
+| 执行 v0.26 完整复现矩阵 | [复现指南](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace-v026/benchmarks/scheduler_trace/README.md) |
+| 查看 v0.26 实现、测试与代码地图 | [源码项目概览](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace-v026/docs/scheduler_trace_lab_project_overview.md) |
 
 源码复现指南保留了精确命令、scenario configs、分析器和测试入口。模型、虚拟
 环境、原始 profiler 报告和大体积运行目录不会复制到这个展示仓库。
@@ -97,7 +104,7 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 
 实验固定使用 vLLM v0.26.0、MRV2、`TRITON_ATTN`、
 Qwen2.5-0.5B-Instruct FP16、WSL2 和 RTX 2060 Laptop GPU。结论不能直接外推到
-多 GPU serving、大模型、其他 attention backend 或 CUDA Graph 模式。
+多 GPU serving、大模型、其他 attention backend、CUDA Graph 模式或 v0.28。
 
 稳定的策略判断来自无 profiler 的重复 benchmark；单次 profiler 与 NCU capture
-只用于解释执行结构。
+只用于解释执行结构。v0.28 的 GPU 与性能结论将在重新获得实验环境并完成独立验证后单独发布。
