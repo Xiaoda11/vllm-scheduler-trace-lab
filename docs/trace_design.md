@@ -1,11 +1,14 @@
-# Trace 设计与实现
+# v0.26 Trace 设计与实现
+
+本文的实验、命令与样例范围为 **v0.26**。v0.28 工程迁移及 CPU 验证见
+[v0.28 进展](v028_migration.md)；旧版 GPU 数据不代表新版性能。
 
 这个 Trace 的目标不是记录“某个请求很慢”，而是回答慢在哪个调度步骤发生、Scheduler 做了什么决定，以及该决定最终如何变成 Model Runner 的输入。
 
 ## 数据流
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[请求队列与 KV 状态] --> B[Scheduler.schedule]
     B --> C[Scheduler step JSONL]
     B --> D[SchedulerOutput]

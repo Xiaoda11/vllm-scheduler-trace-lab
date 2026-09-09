@@ -1,25 +1,49 @@
 # vLLM Scheduler Trace Lab（调度追踪实验）
 
-一个基于证据的 vLLM v0.26 调度研究项目，覆盖 KV Cache 压力、MRV2 输入准备
-以及 RTX 2060 Laptop 6 GiB GPU 上的执行行为。
+面向 LLM Serving 的调度可观测性与策略实验项目：在 **vLLM v0.26** 上完成
+Scheduler/MRV2 跨层 Trace、队首阻塞定位及正反实验，并向 **v0.28** 分阶段迁移
+Trace 基础设施与 Scheduler 热路径埋点。
 
-项目从逐 step 可观测性出发，定位真实的 waiting 队列队头阻塞
-（head-of-line blocking，HOL），实现可选的 bypass 策略，再通过反例否决不安全的
-上游提交方案。最终结果不是一个只有漂亮数字的“加速”，而是一套包含正向收益、
-退化场景和明确证据边界的可复现系统实验。
+本仓库展示设计、实验数据、复现入口与版本进展；实现和测试维护在
+[`Xiaoda11/vllm`](https://github.com/Xiaoda11/vllm)。
 
-> 源码实现位于 [`Xiaoda11/vllm` 的
-> `exp/mrv2-scheduler-trace` 分支](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace)，
-> 精确提交为 [`b27c09dd873de6fff45dc995138becf03288a92f`](https://github.com/Xiaoda11/vllm/commit/b27c09dd873de6fff45dc995138becf03288a92f)。
+## 版本与当前进展
 
-## 研究链路
+状态核对：2026-09-09。v0.26 的 GPU 实验结果与 v0.28 的 CPU 验证分别记录。
+
+| 阶段 | 已完成 | 验证与边界 |
+|---|---|---|
+| v0.26 实验基线 | Scheduler/MRV2 Trace、HOL 定位、无界与 bounded bypass、profiling | 已有单卡 GPU 实验；保留收益和退化反例 |
+| v0.28 Trace 基础设施 | 后台 JSONL writer、schema 版本、旧配置兼容 | [PR #2](https://github.com/Xiaoda11/vllm/pull/2) 已合入个人实验分支 |
+| v0.28 Scheduler 埋点 | 双预算、队列/请求快照、KV 变化、分配失败与抢占事件 | [PR #3](https://github.com/Xiaoda11/vllm/pull/3) 为个人 fork 的 Draft PR；隔离 CPU 测试 **8 passed** |
+| v0.28 端到端验证 | 待补完整真实 Scheduler fixture、GPU 正确性与 Trace 开销测试 | 尚无新版性能结论；未迁移 bypass 策略或完整 MRV2 追踪链路 |
+
+已核对 [lab-trace-cpu CI run #18](https://github.com/Xiaoda11/vllm/actions/runs/34148762458)
+成功；这不等于完整 vLLM CI 或 GPU 验证通过。迁移说明、固定提交和测试命令见
+[v0.28 迁移与验证进展](docs/v028_migration.md)。
+
+- **v0.26 固定实验源码：**[`b27c09d`](https://github.com/Xiaoda11/vllm/tree/b27c09dd873de6fff45dc995138becf03288a92f)。
+- **v0.28 集成分支：**[`exp/mrv2-scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace-v028)。
+- **v0.28 Scheduler 埋点：**[`port/scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v028)（Draft PR，未合入集成分支）。
+
+## v0.28 工程更新
+
+迁移按基础设施和 Scheduler 埋点拆分，保持 Trace 默认关闭，并维护 v0.26 到
+v0.28 的事件语义映射。新版同时记录 `token_budget` 与 `input_budget`，以及
+KV-delivery 相关的抢占语义，避免只沿用旧字段而遗漏新的调度约束。
+
+隔离 CPU 测试覆盖 writer/schema、事件构造、热路径接入的静态检查，以及从真实
+Scheduler 源码提取的快照/事件方法在轻量状态替身上的行为。完整 Scheduler 的
+构造、调度执行与模型运行仍需后续验证。
+
+## v0.26 研究链路
 
 ![vLLM Scheduler Trace Lab 研究链路](assets/research_path.png)
 
 Trace 默认关闭。开启后，它只记录 Scheduler 状态和已有的 CPU metadata，不读取
 GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
 
-## 问题是什么
+## v0.26 队首阻塞问题
 
 在 full-input reservation 和受限的 1,450-block KV pool 下，长请求 B 位于 FCFS
 队首，约需 1,024 blocks，但当时只有 933 blocks 空闲。排在 B 后面的短请求 C
@@ -30,20 +54,20 @@ GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
 规定每个 blocked head 最多允许一次 bypass admission。两种模式都需要显式开启，
 默认 Scheduler 行为保持不变。
 
-## 改变最终判断的实验结果
+## v0.26 实验结果与策略取舍
 
 | 实验 | 结果 | 说明 |
 |---|---:|---|
-| 三请求重复 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 问题和局部收益真实存在 |
+| 无界 bypass 三请求重复 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 问题和局部收益真实存在 |
 | 无界短请求 burst | B first scheduled step：**517 → 587**；B TTFT **+10.0%** | 逐 step 重试不是 starvation bound |
 | bounded 长生命周期 burst | **新增 3 次 preemption**，makespan **+1.21%**，throughput **-1.20%**，TTFT Jain **-10.64%** | admission count 无法限制 KV 生命周期 |
 | Scheduler 对齐 profile | strict：**20 个 single Decode**；bounded：**17 个 single + 1 个 mixed + 2 个 dual Decode** | 策略改变 batch shape 与 kernel 组合，而非 kernel 代码 |
 
-最终结论是：**不提交 upstream PR**。one-admission bound 只能限制绕过队首的请求
+v0.26 候选 bypass 策略的结论是：**不提交该策略的 upstream PR**。one-admission bound 只能限制绕过队首的请求
 数量，不能限制准入请求持有 KV Cache 的时间。因此即使 B 的首次调度 step 不变，
 长生命周期请求仍可能造成后续 preemption 和公平性退化。
 
-## GPU 侧证据
+## v0.26 GPU 侧证据
 
 当前 WSL 路径下的 Nsight Systems 能看到 CUDA API，但没有可靠的 GPU kernel
 timeline。项目使用与 Scheduler 对齐的 PyTorch Profiler fallback，将 step 60–79
@@ -65,7 +89,7 @@ tokens 组成的 bounded mixed step。
 Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchitecture
 证据，不用于端到端策略性能归因。
 
-## 项目实现
+## v0.26 实验实现
 
 - 默认关闭的 Scheduler 与 MRV2 JSONL trace；
 - 支持精确 token、arrival time 和 shared prefix 的 workload generator；
@@ -79,7 +103,8 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 
 | 目标 | 入口 |
 |---|---|
-| 从零复现实验 | [REPRODUCING.md](REPRODUCING.md) |
+| 查看 v0.28 迁移、CI 与待验证项 | [docs/v028_migration.md](docs/v028_migration.md) |
+| 从零复现 v0.26 实验 | [REPRODUCING.md](REPRODUCING.md) |
 | 理解 Trace 数据流与埋点 | [docs/trace_design.md](docs/trace_design.md) |
 | 核对验证证据与适用边界 | [docs/validation.md](docs/validation.md) |
 | 对照 Scheduler 与 MRV2 精简样例 | [examples/README.md](examples/README.md) |
@@ -93,7 +118,7 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 源码复现指南保留了精确命令、scenario configs、分析器和测试入口。模型、虚拟
 环境、原始 profiler 报告和大体积运行目录不会复制到这个展示仓库。
 
-## 复现与结论边界
+## v0.26 复现与结论边界
 
 实验固定使用 vLLM v0.26.0、MRV2、`TRITON_ATTN`、
 Qwen2.5-0.5B-Instruct FP16、WSL2 和 RTX 2060 Laptop GPU。结论不能直接外推到

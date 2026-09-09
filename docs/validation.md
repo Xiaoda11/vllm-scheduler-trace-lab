@@ -1,8 +1,11 @@
 # 验证证据与边界
 
+本文的实验、命令与样例范围为 **v0.26**。v0.28 工程迁移及 CPU 验证见
+[v0.28 进展](v028_migration.md)；旧版 GPU 数据不代表新版性能。
+
 项目把证据分为三层：源码事实用于说明机制，自动化测试用于防止实现回归，端到端实验用于验证真实运行中的行为和代价。推断只建立在前两类证据之上，不把单次时间结果写成普遍结论。
 
-## 已完成的验证
+## v0.26 已完成的验证
 
 | 层级 | 验证内容 | 结果 |
 |---|---|---|
@@ -18,11 +21,11 @@
 
 strict 模式下，waiting 队首长请求申请 KV 失败后，本步停止扫描，因此后面的短请求即使有机会运行也会继续等待。bounded 模式允许在受控条件下跳过该队首，并让后续请求先进入 running。
 
-重复实验中，请求 C 的 TTFT 从 `33.250 s` 降至 `0.182 s`；代价是更早进入的请求 B 首步从 `517` 延至 `587`，其 TTFT 增加约 `10%`。长生命周期实验中出现 3 次抢占，makespan 增加 `1.21%`、吞吐下降 `1.20%`，说明局部等待改善不是免费的全局优化。汇总数据见 [`benchmark_summary.json`](../results/benchmark_summary.json)。
+无界 bypass 的三请求重复 Gate 中，C 的 TTFT 中位数从 `33.250 s` 降至 `0.182 s`，B 首次调度 step 均为 `517`。另一个无界短请求 burst 实验中，B 首步从 `517` 延至 `587`、TTFT 增加约 `10%`。bounded 长生命周期反例中新增 3 次抢占，makespan 增加 `1.21%`、吞吐下降 `1.20%`、TTFT Jain 指数下降 `10.64%`。三者是不同实验，不应把局部收益与反例拼成同一次运行结果。汇总数据见 [`benchmark_summary.json`](../results/benchmark_summary.json)。
 
 profiling 的 step composition 从 strict 的 20 个单请求 Decode，变为 bounded 的 17 个单请求 Decode、1 个 Prefill+Decode 混合 step 和 2 个双请求 Decode step。它支持“调度策略改变了执行批次组成”这一判断，但不能单独证明某个 kernel 时间变化完全由该策略导致。详见 [`profile_summary.json`](../results/profile_summary.json)。
 
-## 当前边界
+## v0.26 验证边界
 
 - 实验集中在单卡、WSL 和 eager backend，绝对延迟不能直接外推到其他硬件与部署方式；
 - Nsight Compute 证明了 kernel 指标采集链路，但当前证据不能把单个 kernel 唯一归因到某个 Scheduler step；

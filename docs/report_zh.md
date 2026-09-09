@@ -1,5 +1,8 @@
 # vLLM v0.26 Scheduler Trace 与 Waiting HOL 策略实验
 
+本文的实验、命令与样例范围为 **v0.26**。v0.28 工程迁移及 CPU 验证见
+[v0.28 进展](v028_migration.md)；旧版 GPU 数据不代表新版性能。
+
 ## 摘要
 
 本项目固定在 vLLM v0.26.0，在 RTX 2060 Laptop GPU 与 WSL2 环境中构建默认
