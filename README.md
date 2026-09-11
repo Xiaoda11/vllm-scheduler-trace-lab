@@ -4,18 +4,30 @@
 Scheduler/MRV2 跨层 Trace、队首阻塞定位及正反实验，并向 **v0.28** 分阶段迁移
 Trace 基础设施与 Scheduler 热路径埋点。
 
-本仓库展示设计、实验数据、复现入口与版本进展；实现和测试维护在
+项目后续已进入 **vLLM upstream Scheduler fairness review**：围绕
+[vLLM PR #33499](https://github.com/vllm-project/vllm/pull/33499) 的 WAITING-queue
+KV bypass 方案，将本仓库实验中发现的 fairness boundary 收缩为 deterministic
+Scheduler reproduction，定位 upstream PR 的 waiting-queue API drift 与 KV regression
+fixture 问题，并推动作者进一步用真实 GPU 验证 sustained-load starvation。
+
+> **核心结论：retry-first ≠ protecting the blocked head's future KV-admission opportunity。**
+> 队首请求每轮优先重试，并不代表它未来的 KV 准入机会受到保护；此前已准入的年轻请求
+> 仍可能跨 iteration 持有 KV，使 blocked head 在持续负载下长期无法进入。
+
+本仓库展示设计、实验数据、复现入口、版本进展与 upstream 共创记录；实现和测试维护在
 [`Xiaoda11/vllm`](https://github.com/Xiaoda11/vllm)。
 
 ## 版本与当前进展
 
-状态核对：2026-09-09。v0.26 的 GPU 实验结果与 v0.28 的 CPU 验证分别记录。
+状态核对：2026-09-11。v0.26 的 GPU 实验结果、v0.28 CPU 验证与 upstream PR review
+分别记录。
 
 | 阶段 | 已完成 | 验证与边界 |
 |---|---|---|
 | v0.26 实验基线 | Scheduler/MRV2 Trace、HOL 定位、无界与 bounded bypass、profiling | 已有单卡 GPU 实验；保留收益和退化反例 |
 | v0.28 Trace 基础设施 | 后台 JSONL writer、schema 版本、旧配置兼容 | [PR #2](https://github.com/Xiaoda11/vllm/pull/2) 已合入个人实验分支 |
 | v0.28 Scheduler 埋点 | 双预算、队列/请求快照、KV 变化、分配失败与抢占事件 | [PR #3](https://github.com/Xiaoda11/vllm/pull/3) 为个人 fork 的 Draft PR；隔离 CPU 测试 **8 passed** |
+| Upstream fairness review | 复现 #33499 HOL bypass、deterministic fairness case、PR implementation/fixture review | PR 作者确认两处问题并完成 GPU adversarial follow-up；当前仍属 upstream 设计讨论 |
 | v0.28 端到端验证 | 待补完整真实 Scheduler fixture、GPU 正确性与 Trace 开销测试 | 尚无新版性能结论；未迁移 bypass 策略或完整 MRV2 追踪链路 |
 
 已核对 [lab-trace-cpu CI run #18](https://github.com/Xiaoda11/vllm/actions/runs/34148762458)
@@ -25,6 +37,50 @@ Trace 基础设施与 Scheduler 热路径埋点。
 - **v0.26 固定实验源码：**[`b27c09d`](https://github.com/Xiaoda11/vllm/tree/b27c09dd873de6fff45dc995138becf03288a92f)。
 - **v0.28 集成分支：**[`exp/mrv2-scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace-v028)。
 - **v0.28 Scheduler 埋点：**[`port/scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v028)（Draft PR，未合入集成分支）。
+- **upstream fairness semantic draft：**[`Xiaoda11/vllm#5`](https://github.com/Xiaoda11/vllm/pull/5)。
+
+## Upstream Scheduler Fairness Review
+
+这部分是当前项目最重要的新进展。
+
+原始实验已经证明：当 FCFS 队首长请求因 KV 不足无法准入时，允许 scheduler 跳过它并继续扫描
+WAITING queue，可以显著改善后续短请求 TTFT；但如果把这种 bypass 直接做成无界默认行为，会产生
+新的 fairness 风险。
+
+在 strict FCFS 与 unbounded skip 的对照负载中：
+
+| Metric | Strict FCFS | Unbounded skip |
+|---|---:|---:|
+| Blocked head first scheduled step | 517 | 587 |
+| Blocked head TTFT | 31.332 s | 34.465 s |
+| Younger requests median TTFT | 32.038 s | 0.706 s |
+| Makespan | 52.747 s | 42.199 s |
+
+也就是说，skip 明显改善 younger requests 和 makespan，但 blocked head 被额外延迟 70 个 scheduler
+step，TTFT 上升约 10%。进一步的 bounded bypass 也无法仅靠“限制 bypass 次数”解决问题，因为已准入
+请求可以持续持有 KV，并在后续造成额外 preemption。
+
+随后，我把这个 fairness boundary 收缩为 deterministic Scheduler-level reproduction，并在验证
+[vLLM PR #33499](https://github.com/vllm-project/vllm/pull/33499) 时发现两处真实问题：
+
+1. allocation-failure 分支仍使用旧 waiting-queue API，触发 `NameError`；
+2. regression fixture 使用 `num_blocks=1`，但 BlockPool 会保留 null block，实际上没有可分配 KV block。
+
+PR 作者确认这两处问题，并基于这条 fairness 线索继续做真实 GPU adversarial validation。持续负载测试中，
+blocked request 在约 **120 s** 内没有获得调度进展，而 **132 个 younger requests** 完成，进一步说明
+unconditional retry-first bypass 可能把原始 HOL blocking 转化为新的 starvation 模式。
+
+因此，本项目对该问题的当前判断不是“已经找到可直接合入的最终策略”，而是明确了一个更严格的 scheduler
+语义边界：
+
+> **retry-first 只保证重试顺序，不保证 blocked head 的未来 KV-admission opportunity。**
+
+基于这一边界，提出的方向是 bounded / **revocable backfill**：允许 younger work 使用暂时闲置容量，但如果
+回收这些 backfill KV 可以使 protected head 重新满足准入条件，则这些 KV 必须可被撤销，而不能永久占用
+protected head 的未来准入机会。
+
+完整 upstream 复现、实现问题、deterministic case 与策略边界见：
+[docs/upstream_fairness_review.md](docs/upstream_fairness_review.md)。
 
 ## v0.28 工程更新
 
@@ -103,6 +159,7 @@ Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchi
 
 | 目标 | 入口 |
 |---|---|
+| 查看 upstream fairness review 与 deterministic reproduction | [docs/upstream_fairness_review.md](docs/upstream_fairness_review.md) |
 | 查看 v0.28 迁移、CI 与待验证项 | [docs/v028_migration.md](docs/v028_migration.md) |
 | 从零复现 v0.26 实验 | [REPRODUCING.md](REPRODUCING.md) |
 | 理解 Trace 数据流与埋点 | [docs/trace_design.md](docs/trace_design.md) |
