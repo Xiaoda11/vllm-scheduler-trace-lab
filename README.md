@@ -1,136 +1,211 @@
-# vLLM Scheduler Trace Lab（调度追踪实验）
+# vLLM Scheduler Trace Lab
 
-面向 LLM Serving 的调度可观测性与策略实验项目：在 **vLLM v0.26** 上完成
-Scheduler/MRV2 跨层 Trace、队首阻塞定位及正反实验，并向 **v0.28** 分阶段迁移
-Trace 基础设施与 Scheduler 热路径埋点。
+面向 LLM Serving 的调度可观测性、KV-pressure fairness 与策略实验项目。
 
-项目后续已进入 **vLLM upstream Scheduler fairness review**：围绕
-[vLLM PR #33499](https://github.com/vllm-project/vllm/pull/33499) 的 WAITING-queue
-KV bypass 方案，将本仓库实验中发现的 fairness boundary 收缩为 deterministic
-Scheduler reproduction，定位 upstream PR 的 waiting-queue API drift 与 KV regression
-fixture 问题，并推动作者进一步用真实 GPU 验证 sustained-load starvation。
+项目从 vLLM v0.26 的 Scheduler / MRV2 跨层 Trace 与 HOL blocking 实验开始，经历 v0.28 迁移后，当前 Trace 主线已经迁移到 **vLLM v0.29**；同时围绕 upstream PR #33499 将 fairness boundary 收缩成 deterministic Scheduler case，并继续验证 bounded / revocable-backfill 方向。
 
-> **核心结论：retry-first ≠ protecting the blocked head's future KV-admission opportunity。**
-> 队首请求每轮优先重试，并不代表它未来的 KV 准入机会受到保护；此前已准入的年轻请求
-> 仍可能跨 iteration 持有 KV，使 blocked head 在持续负载下长期无法进入。
+> **当前核心结论：retry-first ≠ protecting the blocked head's future KV-admission opportunity。**
+>
+> 队首请求每轮优先重试，并不代表它未来的 KV 准入机会受到保护；此前已准入的 younger request 仍可能跨 iteration 持有 KV，使 blocked head 长时间无法进入。
 
-本仓库展示设计、实验数据、复现入口、版本进展与 upstream 共创记录；实现和测试维护在
-[`Xiaoda11/vllm`](https://github.com/Xiaoda11/vllm)。
+展示仓库负责设计、实验、验证证据与 upstream 协作记录；当前实现与测试维护在 [`Xiaoda11/vllm`](https://github.com/Xiaoda11/vllm)。
 
-## 版本与当前进展
+## 当前状态（2026-09-16）
 
-状态核对：2026-09-11。v0.26 的 GPU 实验结果、v0.28 CPU 验证与 upstream PR review
-分别记录。
-
-| 阶段 | 已完成 | 验证与边界 |
+| 阶段 | 当前状态 | 证据边界 |
 |---|---|---|
-| v0.26 实验基线 | Scheduler/MRV2 Trace、HOL 定位、无界与 bounded bypass、profiling | 已有单卡 GPU 实验；保留收益和退化反例 |
-| v0.28 Trace 基础设施 | 后台 JSONL writer、schema 版本、旧配置兼容 | [PR #2](https://github.com/Xiaoda11/vllm/pull/2) 已合入个人实验分支 |
-| v0.28 Scheduler 埋点 | 双预算、队列/请求快照、KV 变化、分配失败与抢占事件 | [PR #3](https://github.com/Xiaoda11/vllm/pull/3) 为个人 fork 的 Draft PR；隔离 CPU 测试 **8 passed** |
-| Upstream fairness review | 复现 #33499 HOL bypass、deterministic fairness case、PR implementation/fixture review | PR 作者确认两处问题并完成 GPU adversarial follow-up；当前仍属 upstream 设计讨论 |
-| v0.28 端到端验证 | 待补完整真实 Scheduler fixture、GPU 正确性与 Trace 开销测试 | 尚无新版性能结论；未迁移 bypass 策略或完整 MRV2 追踪链路 |
+| **v0.29 Scheduler Trace** | Scheduler + MRV2 + TP sampler-shard trace 已迁移 | isolated CPU **22 passed**；real Scheduler / IPC CPU **8 passed** |
+| **v0.29 跨进程 correlation** | step ID 已验证穿过真实 MessageQueue 与 `WorkerProc._execute_worker_rpc()` | 尚未完成完整 real-model worker lifecycle |
+| **v0.29 KV connector trace** | sync KV-load 标记与 offered block state 已接入 | mock connector 验证；非真实网络 transfer |
+| **v0.29 多 worker 设计** | process-local MRV2 JSONL + `worker_rank` | contract-tested；真实 TP/PP/PCP GPU 待验证 |
+| **v0.26 实验基线** | HOL、bypass、fairness、profiling 均有单卡 GPU 数据 | 旧版性能结果不能直接代表 v0.29 |
+| **Upstream fairness review** | PR #33499 deterministic reproduction + semantic review | upstream 设计讨论，不宣称 merge ownership |
+| **Revocable backfill prototype** | narrow FCFS / local-KV reclaim prototype + focused CPU regression | 仍是实验策略，不是 production-ready policy |
 
-已核对 [lab-trace-cpu CI run #18](https://github.com/Xiaoda11/vllm/actions/runs/34148762458)
-成功；这不等于完整 vLLM CI 或 GPU 验证通过。迁移说明、固定提交和测试命令见
-[v0.28 迁移与验证进展](docs/v028_migration.md)。
+当前 v0.29 Trace 分支：[`port/scheduler-trace-v029`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v029)，当前记录的分支头为 `bb03a6e3702c88803a1074825ec4d84ba139dfb0`。
 
-- **v0.26 固定实验源码：**[`b27c09d`](https://github.com/Xiaoda11/vllm/tree/b27c09dd873de6fff45dc995138becf03288a92f)。
-- **v0.28 集成分支：**[`exp/mrv2-scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/exp/mrv2-scheduler-trace-v028)。
-- **v0.28 Scheduler 埋点：**[`port/scheduler-trace-v028`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v028)（Draft PR，未合入集成分支）。
-- **upstream fairness semantic draft：**[`Xiaoda11/vllm#5`](https://github.com/Xiaoda11/vllm/pull/5)。
+Revocable-backfill 实验分支：[`test/pr33499-revocable-backfill-regression`](https://github.com/Xiaoda11/vllm/tree/test/pr33499-revocable-backfill-regression)。
+
+## 项目主线
+
+```text
+v0.26: 先建立 Scheduler <-> MRV2 Trace
+              ↓
+       复现 KV-pressure HOL blocking
+              ↓
+       strict vs bypass 实验
+              ↓
+       发现 fairness / preemption 反例
+              ↓
+upstream PR #33499 fairness review
+              ↓
+ deterministic Scheduler reduction
+              ↓
+ bounded / revocable-backfill direction
+
+同时：
+v0.26 Trace -> v0.28 migration -> v0.29 Scheduler/MRV2/IPC/TP trace
+```
+
+## v0.29 Trace：当前工程重点
+
+### 1. Scheduler step trace
+
+Scheduler 侧记录：
+
+- running / waiting / skipped-waiting before / after；
+- request 状态与 block table；
+- per-request scheduled tokens；
+- `token_budget` 与 `input_budget`；
+- KV usage、free blocks、block mapping diff；
+- prefix-cache hit；
+- allocation failure、preemption、finished request；
+- v0.29 `has_sync_kv_loads` 与 connector offered block state。
+
+Trace 默认关闭。开启时使用已有 CPU/Python metadata 构造事件，不为了观测主动读取 GPU tensor 内容，也不引入显式 CUDA synchronization。
+
+### 2. MRV2 batch trace
+
+v0.29 不再把“Scheduler token 数”和“真正 model input token 数”当作同一个量。
+
+当前 `model_runner_batch` 明确区分：
+
+```text
+scheduler_logical
+    ↓ CPU-visible trimming / adaptive verification
+runner_effective_unpadded
+    ↓ CUDA Graph padding
+model_input_after_padding
+```
+
+这使 Trace 可以解释 batch shape 是在哪一层发生变化，而不是把 runner / graph 行为错误归因给 Scheduler。
+
+### 3. Scheduler → Worker correlation
+
+Trace step ID 随 `SchedulerOutput` 穿过 vLLM MessageQueue / WorkerProc RPC，并保存在对应 `InputBatch` 上。
+
+CPU CI 已验证：
+
+```text
+SchedulerOutput
+    ↓ pickle / MessageQueue cross-process
+WorkerProc._execute_worker_rpc()
+    ↓
+worker.execute_model(...)
+```
+
+correlation ID 和 scheduled-token map 在 tested path 中保持一致。
+
+### 4. TP batch-sharded sampling
+
+新增 `sampler_batch_shard` event，记录：
+
+- global / local request layout；
+- persistent rows；
+- `persistent_row % tp_size` ownership；
+- per-rank request count；
+- per-rank logit split。
+
+不会为了 Trace 把 GPU-only gather / sort plan tensor 拉回 CPU。
+
+### 5. 多 worker JSONL
+
+每个 MRV2 worker 使用独立输出文件：
+
+```text
+<trace-stem>.mrv2.pid<PID>.jsonl
+```
+
+事件同时包含 global `worker_rank`，避免 TP / PP / PCP worker 争用一个独占 JSONL 路径，并支持后续按 `step_id + worker_rank` 合并。
+
+完整设计见 [`docs/trace_design.md`](docs/trace_design.md)，v0.29 迁移与验证见 [`docs/v029_migration.md`](docs/v029_migration.md)。
+
+## v0.29 验证
+
+截至 2026-09-14：
+
+### Isolated trace CPU suite：22 passed
+
+覆盖 writer/schema、Scheduler events、MRV2 batch semantics、adaptive-verification trimming、CUDA Graph padding、worker rank、TP sampler-shard ownership、step correlation serialization、writer lifecycle 与 no-sync/no-D2H 静态 contract。
+
+### Real Scheduler / IPC CPU suite：8 passed
+
+覆盖 real WAITING → RUNNING prefill、KV allocation failure、request completion、KV-pressure preemption、sync KV-load mock path，以及真实 vLLM MessageQueue 跨进程 transport 与生产 `WorkerProc._execute_worker_rpc()` dispatch。
+
+这证明了当前 CPU contract 与 tested IPC path，**不等于完整 real-model GPU engine、TP/PP/PCP 或真实 KV network transport 已验证**。当前也不做任何 v0.29 Trace overhead 性能宣称。
+
+## HOL blocking：项目最初的问题
+
+在 v0.26 受限 KV pool 实验中，长请求位于 FCFS WAITING 队首但 KV 不足；后面的短请求其实可以容纳，但 strict Scheduler 在队首 allocation failure 后停止扫描，从而产生 head-of-line blocking。
+
+实验因此尝试让 Scheduler 暂时 skip blocked head，继续寻找后续可容纳请求。
+
+## v0.26 实验结果
+
+| 实验 | 结果 | 结论 |
+|---|---:|---|
+| 无界 bypass 三请求 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 局部收益非常明显 |
+| 无界短请求 burst | blocked head first step：**517 → 587**；TTFT **+10%** | retry-first 不是 starvation bound |
+| bounded 长生命周期 burst | **+3 preemption**；makespan **+1.21%**；throughput **-1.20%**；TTFT Jain **-10.64%** | admission count 无法限制 KV 生命周期 |
+| Scheduler-aligned profile | strict：20 single Decode；bounded：17 single + 1 mixed + 2 dual Decode | 调度策略改变 batch shape / kernel mix |
+
+所以项目没有把 naive bypass 当作最终答案。one-admission / fixed-count bound 只能限制“有多少请求绕过队首”，不能保证这些请求不会长期占用 KV。
 
 ## Upstream Scheduler Fairness Review
 
-这部分是当前项目最重要的新进展。
+对应 upstream 讨论为 vLLM PR #33499：当 WAITING 队首因为 KV block 不足而无法准入时，是否应该 skip 当前 head 并继续扫描后面的请求。
 
-原始实验已经证明：当 FCFS 队首长请求因 KV 不足无法准入时，允许 scheduler 跳过它并继续扫描
-WAITING queue，可以显著改善后续短请求 TTFT；但如果把这种 bypass 直接做成无界默认行为，会产生
-新的 fairness 风险。
+项目将 fairness 问题从 wall-clock benchmark 收缩成 deterministic Scheduler-level reproduction：
 
-在 strict FCFS 与 unbounded skip 的对照负载中：
+```text
+4 allocatable KV blocks
 
-| Metric | Strict FCFS | Unbounded skip |
-|---|---:|---:|
-| Blocked head first scheduled step | 517 | 587 |
-| Blocked head TTFT | 31.332 s | 34.465 s |
-| Younger requests median TTFT | 32.038 s | 0.706 s |
-| Makespan | 52.747 s | 42.199 s |
+incumbent holds 2
+heavy older request needs 4 -> blocked
+backfill younger request needs 1 -> admitted
 
-也就是说，skip 明显改善 younger requests 和 makespan，但 blocked head 被额外延迟 70 个 scheduler
-step，TTFT 上升约 10%。进一步的 bounded bypass 也无法仅靠“限制 bypass 次数”解决问题，因为已准入
-请求可以持续持有 KV，并在后续造成额外 preemption。
+incumbent exits -> 3 free
+heavy retried first but still needs 4
+backfill still owns 1
 
-随后，我把这个 fairness boundary 收缩为 deterministic Scheduler-level reproduction，并在验证
-[vLLM PR #33499](https://github.com/vllm-project/vllm/pull/33499) 时发现两处真实问题：
+=> retry-first, but heavy still cannot enter
+```
 
-1. allocation-failure 分支仍使用旧 waiting-queue API，触发 `NameError`；
-2. regression fixture 使用 `num_blocks=1`，但 BlockPool 会保留 null block，实际上没有可分配 KV block。
+这直接区分了：
 
-PR 作者确认这两处问题，并基于这条 fairness 线索继续做真实 GPU adversarial validation。持续负载测试中，
-blocked request 在约 **120 s** 内没有获得调度进展，而 **132 个 younger requests** 完成，进一步说明
-unconditional retry-first bypass 可能把原始 HOL blocking 转化为新的 starvation 模式。
+```text
+queue retry priority
+!=
+future KV-admission protection
+```
 
-因此，本项目对该问题的当前判断不是“已经找到可直接合入的最终策略”，而是明确了一个更严格的 scheduler
-语义边界：
+完整 review 见 [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md)。
 
-> **retry-first 只保证重试顺序，不保证 blocked head 的未来 KV-admission opportunity。**
+## Revocable-backfill prototype
 
-基于这一边界，提出的方向是 bounded / **revocable backfill**：允许 younger work 使用暂时闲置容量，但如果
-回收这些 backfill KV 可以使 protected head 重新满足准入条件，则这些 KV 必须可被撤销，而不能永久占用
-protected head 的未来准入机会。
+当前实验方向是：只有那些**确实在某个 blocked head 后面被准入的 younger work** 才被标记为 revocable backfill。
 
-完整 upstream 复现、实现问题、deterministic case 与策略边界见：
-[docs/upstream_fairness_review.md](docs/upstream_fairness_review.md)。
+如果未来某一步：
 
-## v0.28 工程更新
+```text
+free KV + tracked backfill KV
+>= protected head required KV
+```
 
-迁移按基础设施和 Scheduler 埋点拆分，保持 Trace 默认关闭，并维护 v0.26 到
-v0.28 的事件语义映射。新版同时记录 `token_budget` 与 `input_budget`，以及
-KV-delivery 相关的抢占语义，避免只沿用旧字段而遗漏新的调度约束。
+则可以撤销该 tracked backfill，通过正常 preemption 路径释放 KV，再立刻 retry protected head。
 
-隔离 CPU 测试覆盖 writer/schema、事件构造、热路径接入的静态检查，以及从真实
-Scheduler 源码提取的快照/事件方法在轻量状态替身上的行为。完整 Scheduler 的
-构造、调度执行与模型运行仍需后续验证。
+focused CPU regression 同时要求：
 
-## v0.26 研究链路
+- ordinary running request 不能被错误 reclaim；
+- reclaim 不足以解锁 head 时不能抢占；
+- finished backfill tracking 必须清理；
+- prototype 目前只覆盖 narrow FCFS / local KV-only / single concurrent batch / single KV group 范围。
 
-![vLLM Scheduler Trace Lab 研究链路](assets/research_path.png)
+因此应把它描述成 **fairness invariant + narrow revocable-backfill prototype**，而不是“已经解决 vLLM starvation 的最终策略”。
 
-Trace 默认关闭。开启后，它只记录 Scheduler 状态和已有的 CPU metadata，不读取
-GPU tensor、不调用 `.item()`，也不增加 CUDA synchronize。
+## v0.26 GPU / profiler 证据
 
-## v0.26 队首阻塞问题
-
-在 full-input reservation 和受限的 1,450-block KV pool 下，长请求 B 位于 FCFS
-队首，约需 1,024 blocks，但当时只有 933 blocks 空闲。排在 B 后面的短请求 C
-只需约 64 blocks，本可以被容纳；strict Scheduler 却在 B allocation failure 后
-停止扫描，导致 C 也等待了约 33 秒。
-
-实验策略允许暂时跳过被阻塞的队首请求，准入后续可容纳请求。bounded 版本进一步
-规定每个 blocked head 最多允许一次 bypass admission。两种模式都需要显式开启，
-默认 Scheduler 行为保持不变。
-
-## v0.26 实验结果与策略取舍
-
-| 实验 | 结果 | 说明 |
-|---|---:|---|
-| 无界 bypass 三请求重复 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 问题和局部收益真实存在 |
-| 无界短请求 burst | B first scheduled step：**517 → 587**；B TTFT **+10.0%** | 逐 step 重试不是 starvation bound |
-| bounded 长生命周期 burst | **新增 3 次 preemption**，makespan **+1.21%**，throughput **-1.20%**，TTFT Jain **-10.64%** | admission count 无法限制 KV 生命周期 |
-| Scheduler 对齐 profile | strict：**20 个 single Decode**；bounded：**17 个 single + 1 个 mixed + 2 个 dual Decode** | 策略改变 batch shape 与 kernel 组合，而非 kernel 代码 |
-
-v0.26 候选 bypass 策略的结论是：**不提交该策略的 upstream PR**。one-admission bound 只能限制绕过队首的请求
-数量，不能限制准入请求持有 KV Cache 的时间。因此即使 B 的首次调度 step 不变，
-长生命周期请求仍可能造成后续 preemption 和公平性退化。
-
-## v0.26 GPU 侧证据
-
-当前 WSL 路径下的 Nsight Systems 能看到 CUDA API，但没有可靠的 GPU kernel
-timeline。项目使用与 Scheduler 对齐的 PyTorch Profiler fallback，将 step 60–79
-对应到真实 CUDA 工作，并观察到一个由 1 个 Decode token 和 1,024 个 Prefill
-tokens 组成的 bounded mixed step。
-
-针对一个真实 Prefill GEMM 的 Nsight Compute 采集结果如下：
+历史单卡实验使用 RTX 2060 Laptop GPU。针对一个真实 Prefill GEMM 的 NCU 采集曾得到：
 
 | 指标 | 数值 |
 |---|---:|
@@ -141,45 +216,36 @@ tokens 组成的 bounded mixed step。
 | `math_pipe_throttle` stall | 61.85% |
 | `long_scoreboard` stall | 1.41% |
 
-这个 launch 不呈现简单的 DRAM-latency-bound 特征。但它的 grid 尚未与 mixed
-Scheduler step 唯一对齐，因此这些 counter 只作为 targeted microarchitecture
-证据，不用于端到端策略性能归因。
+该 counter 只作为 targeted microarchitecture 证据；由于 launch 尚未与单个 mixed Scheduler step 唯一绑定，不用于做严格端到端因果归因。
 
-## v0.26 实验实现
+## 阅读顺序
 
-- 默认关闭的 Scheduler 与 MRV2 JSONL trace；
-- 支持精确 token、arrival time 和 shared prefix 的 workload generator；
-- trace-to-CSV、benchmark aggregate 与 profiler alignment 分析器；
-- 可选的无界与 one-admission waiting bypass；
-- Scheduler、workload、trace 和 analyzer 的针对性测试；
-- 覆盖 8K/16K Prefill、Prefill/Decode 混合、Prefix Cache 复用、allocation
-  failure、preemption 和请求生命周期反例的受控 workload。
-
-## 阅读与复现
+面试或代码 review 建议按这个顺序：
 
 | 目标 | 入口 |
 |---|---|
-| 查看 upstream fairness review 与 deterministic reproduction | [docs/upstream_fairness_review.md](docs/upstream_fairness_review.md) |
-| 查看 v0.28 迁移、CI 与待验证项 | [docs/v028_migration.md](docs/v028_migration.md) |
-| 从零复现 v0.26 实验 | [REPRODUCING.md](REPRODUCING.md) |
-| 理解 Trace 数据流与埋点 | [docs/trace_design.md](docs/trace_design.md) |
-| 核对验证证据与适用边界 | [docs/validation.md](docs/validation.md) |
-| 对照 Scheduler 与 MRV2 精简样例 | [examples/README.md](examples/README.md) |
-| 阅读中文工程报告 | [docs/report_zh.md](docs/report_zh.md) |
-| 查看可机器读取的 benchmark 结果 | [results/benchmark_summary.json](results/benchmark_summary.json) |
-| 查看 profiling 结果及证据边界 | [results/profile_summary.json](results/profile_summary.json) |
-| 阅读源码分支中的完整工程报告 | [完整报告](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_final_report.md) |
-| 执行完整复现矩阵 | [复现指南](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/benchmarks/scheduler_trace/README.md) |
-| 查看实现、测试与代码地图 | [源码项目概览](https://github.com/Xiaoda11/vllm/blob/exp/mrv2-scheduler-trace/docs/scheduler_trace_lab_project_overview.md) |
+| 先理解项目问题与当前状态 | 本 README |
+| 理解 v0.29 Trace 数据流 | [`docs/trace_design.md`](docs/trace_design.md) |
+| 看 v0.29 迁移、测试与 remaining gates | [`docs/v029_migration.md`](docs/v029_migration.md) |
+| 看 fairness invariant / upstream 协作 | [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md) |
+| 核对证据强弱与边界 | [`docs/validation.md`](docs/validation.md) |
+| 回看 v0.26 GPU 实验复现 | [`REPRODUCING.md`](REPRODUCING.md) |
+| 历史 v0.28 迁移过程 | [`docs/v028_migration.md`](docs/v028_migration.md) |
 
-源码复现指南保留了精确命令、scenario configs、分析器和测试入口。模型、虚拟
-环境、原始 profiler 报告和大体积运行目录不会复制到这个展示仓库。
+当前源码重点：
 
-## v0.26 复现与结论边界
+- [`v0.29 trace.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace.py)
+- [`v0.29 trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace_event.py)
+- [`v0.29 scheduler.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/scheduler.py)
+- [`v0.29 model_runner_trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/model_runner_trace_event.py)
+- [`v0.29 GPUModelRunner`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/worker/gpu/model_runner.py)
+- [`revocable-backfill regression`](https://github.com/Xiaoda11/vllm/blob/test/pr33499-revocable-backfill-regression/tests/v1/core/test_scheduler_revocable_backfill_regression.py)
 
-实验固定使用 vLLM v0.26.0、MRV2、`TRITON_ATTN`、
-Qwen2.5-0.5B-Instruct FP16、WSL2 和 RTX 2060 Laptop GPU。结论不能直接外推到
-多 GPU serving、大模型、其他 attention backend 或 CUDA Graph 模式。
+## 证据边界
 
-稳定的策略判断来自无 profiler 的重复 benchmark；单次 profiler 与 NCU capture
-只用于解释执行结构。
+当前最强的工程结论是：
+
+- v0.26 已有真实单卡实验，证明 HOL 问题以及 naive/bounded bypass 的收益和 fairness 反例；
+- upstream fairness boundary 已被压缩成 deterministic Scheduler semantic case；
+- v0.29 Trace 已建立 Scheduler、MRV2、KV connector、IPC correlation 与 TP sampler-shard 的 CPU contract；
+- v0.29 仍缺 real-model GPU end-to-end、真实多卡和 overhead 对照，所以不会把旧 GPU 数据包装成新版性能结果。
