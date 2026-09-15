@@ -1,161 +1,128 @@
 # vLLM Scheduler Trace Lab
 
-面向 LLM Serving 的调度可观测性、KV-pressure fairness 与策略实验项目。
+面向 LLM Serving 的 Scheduler 可观测性、KV-pressure HOL blocking 与 fairness 实验项目。
 
-项目从 vLLM v0.26 的 Scheduler / MRV2 跨层 Trace 与 HOL blocking 实验开始，经历 v0.28 迁移后，当前 Trace 主线已经迁移到 **vLLM v0.29**；同时围绕 upstream PR #33499 将 fairness boundary 收缩成 deterministic Scheduler case，并继续验证 bounded / revocable-backfill 方向。
+**本仓库是展示/研究仓库，不是实现事实源。当前实现状态始终以 `Xiaoda11/vllm` 对应源码分支为准。** 详细同步规则见 [`docs/source_of_truth.md`](docs/source_of_truth.md)。
 
-> **当前核心结论：retry-first ≠ protecting the blocked head's future KV-admission opportunity。**
->
-> 队首请求每轮优先重试，并不代表它未来的 KV 准入机会受到保护；此前已准入的 younger request 仍可能跨 iteration 持有 KV，使 blocked head 长时间无法进入。
+## 当前源码事实源（2026-09-16）
 
-展示仓库负责设计、实验、验证证据与 upstream 协作记录；当前实现与测试维护在 [`Xiaoda11/vllm`](https://github.com/Xiaoda11/vllm)。
+| 工程线 | 源码分支 | 当前分支头 | 当前证据边界 |
+|---|---|---|---|
+| **v0.29 Scheduler / MRV2 Trace** | [`port/scheduler-trace-v029`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v029) | `bb03a6e3702c88803a1074825ec4d84ba139dfb0` | isolated CPU **22 passed**；real Scheduler / IPC CPU **8 passed**；real-model GPU E2E / overhead 待验证 |
+| **Fairness / revocable-backfill prototype** | [`test/pr33499-revocable-backfill-regression`](https://github.com/Xiaoda11/vllm/tree/test/pr33499-revocable-backfill-regression) | `71cba372641121f3a87387e678e310eb0bc2d9fa` | deterministic fairness case + narrow reclaim prototype；不是 production-ready policy |
+| **v0.26 GPU 实验基线** | 历史 `exp/mrv2-scheduler-trace` 实验线 | 历史基线 | HOL / bypass / fairness / profiling 有单卡 GPU 证据；不能当作 v0.29 性能结果 |
 
-## 当前状态（2026-09-16）
+> **核心 fairness invariant：retry-first != protecting the blocked head's future KV-admission opportunity.**
 
-| 阶段 | 当前状态 | 证据边界 |
-|---|---|---|
-| **v0.29 Scheduler Trace** | Scheduler + MRV2 + TP sampler-shard trace 已迁移 | isolated CPU **22 passed**；real Scheduler / IPC CPU **8 passed** |
-| **v0.29 跨进程 correlation** | step ID 已验证穿过真实 MessageQueue 与 `WorkerProc._execute_worker_rpc()` | 尚未完成完整 real-model worker lifecycle |
-| **v0.29 KV connector trace** | sync KV-load 标记与 offered block state 已接入 | mock connector 验证；非真实网络 transfer |
-| **v0.29 多 worker 设计** | process-local MRV2 JSONL + `worker_rank` | contract-tested；真实 TP/PP/PCP GPU 待验证 |
-| **v0.26 实验基线** | HOL、bypass、fairness、profiling 均有单卡 GPU 数据 | 旧版性能结果不能直接代表 v0.29 |
-| **Upstream fairness review** | PR #33499 deterministic reproduction + semantic review | upstream 设计讨论，不宣称 merge ownership |
-| **Revocable backfill prototype** | narrow FCFS / local-KV reclaim prototype + focused CPU regression | 仍是实验策略，不是 production-ready policy |
+队首请求每个 iteration 先重试，并不意味着它未来的 KV 准入机会被保护。此前已绕过它、进入 running 的 younger request 仍可能长期持有 KV，从而继续阻塞 protected head。
 
-当前 v0.29 Trace 分支：[`port/scheduler-trace-v029`](https://github.com/Xiaoda11/vllm/tree/port/scheduler-trace-v029)，当前记录的分支头为 `bb03a6e3702c88803a1074825ec4d84ba139dfb0`。
-
-Revocable-backfill 实验分支：[`test/pr33499-revocable-backfill-regression`](https://github.com/Xiaoda11/vllm/tree/test/pr33499-revocable-backfill-regression)。
-
-## 项目主线
+## 一条主故事，而不是三个互不相关的项目
 
 ```text
-v0.26: 先建立 Scheduler <-> MRV2 Trace
-              ↓
-       复现 KV-pressure HOL blocking
-              ↓
-       strict vs bypass 实验
-              ↓
-       发现 fairness / preemption 反例
-              ↓
-upstream PR #33499 fairness review
-              ↓
- deterministic Scheduler reduction
-              ↓
- bounded / revocable-backfill direction
+1. 先发现问题
+   v0.26 strict FCFS + KV pressure
+   -> blocked head 申请 KV 失败
+   -> 后面的短请求其实放得下，但 scheduler 停止扫描
+   -> HOL blocking
 
-同时：
-v0.26 Trace -> v0.28 migration -> v0.29 Scheduler/MRV2/IPC/TP trace
+2. 先建立观测能力
+   Scheduler Trace + MRV2 Trace
+   -> queue / request / KV / token budget
+   -> SchedulerOutput
+   -> Model Runner batch
+   -> 按 step 对齐
+
+3. 再做策略实验
+   strict -> bypass -> bounded bypass
+   -> younger TTFT 大幅改善
+   -> 但 blocked head 更晚 / preemption / fairness 退化
+   -> naive bypass 不能作为最终答案
+
+4. 把问题缩成确定性语义
+   upstream PR #33499 fairness review
+   -> queue retry priority != future KV-admission protection
+   -> deterministic Scheduler testcase
+
+5. 继续验证更窄的策略方向
+   revocable backfill
+   -> 只追踪真正绕过 protected head 的 younger work
+   -> reclaim 足以解锁 head 时才撤销
+   -> ordinary running request 不能被误伤
+
+并行工程线：
+v0.26 Trace -> v0.28 migration -> v0.29 Scheduler / MRV2 / IPC / TP trace
 ```
 
-## v0.29 Trace：当前工程重点
+## v0.29 Trace 当前实现
 
-### 1. Scheduler step trace
+### Scheduler side
 
-Scheduler 侧记录：
+`scheduler_step` 记录：
 
 - running / waiting / skipped-waiting before / after；
-- request 状态与 block table；
+- request 状态与 block table snapshot；
 - per-request scheduled tokens；
 - `token_budget` 与 `input_budget`；
-- KV usage、free blocks、block mapping diff；
-- prefix-cache hit；
-- allocation failure、preemption、finished request；
-- v0.29 `has_sync_kv_loads` 与 connector offered block state。
+- KV usage / free blocks / request block mapping diff；
+- prefix hit、allocation failure、preemption、finished request；
+- v0.29 KV connector `has_sync_kv_loads` 与 offered block state。
 
-Trace 默认关闭。开启时使用已有 CPU/Python metadata 构造事件，不为了观测主动读取 GPU tensor 内容，也不引入显式 CUDA synchronization。
+Trace 默认关闭。开启后只使用已有 CPU/Python metadata 做 side-band instrumentation，不为了 trace 主动读取 GPU tensor，也不增加显式 CUDA synchronization。
 
-### 2. MRV2 batch trace
+### Scheduler -> Worker correlation
 
-v0.29 不再把“Scheduler token 数”和“真正 model input token 数”当作同一个量。
-
-当前 `model_runner_batch` 明确区分：
-
-```text
-scheduler_logical
-    ↓ CPU-visible trimming / adaptive verification
-runner_effective_unpadded
-    ↓ CUDA Graph padding
-model_input_after_padding
-```
-
-这使 Trace 可以解释 batch shape 是在哪一层发生变化，而不是把 runner / graph 行为错误归因给 Scheduler。
-
-### 3. Scheduler → Worker correlation
-
-Trace step ID 随 `SchedulerOutput` 穿过 vLLM MessageQueue / WorkerProc RPC，并保存在对应 `InputBatch` 上。
-
-CPU CI 已验证：
+Trace 开启时，SchedulerOutput 附加 step correlation ID，并在 tested CPU path 中穿过：
 
 ```text
 SchedulerOutput
-    ↓ pickle / MessageQueue cross-process
-WorkerProc._execute_worker_rpc()
-    ↓
-worker.execute_model(...)
+  -> MessageQueue cross-process serialization
+  -> WorkerProc._execute_worker_rpc()
+  -> worker.execute_model(...)
 ```
 
-correlation ID 和 scheduled-token map 在 tested path 中保持一致。
+correlation ID 使用 per-`InputBatch` 保存，避免 overlapping batch 时 runner-global slot 被覆盖。
 
-### 4. TP batch-sharded sampling
+### MRV2 / Model Runner side
 
-新增 `sampler_batch_shard` event，记录：
+`model_runner_batch` 在 v0.29 明确区分：
 
-- global / local request layout；
-- persistent rows；
-- `persistent_row % tp_size` ownership；
-- per-rank request count；
-- per-rank logit split。
+```text
+scheduler_logical
+  -> CPU-visible trimming / adaptive verification
+runner_effective_unpadded
+  -> CUDA Graph padding
+model_input_after_padding
+```
 
-不会为了 Trace 把 GPU-only gather / sort plan tensor 拉回 CPU。
+因此 runner trimming 和 graph padding 不会被误解释成 Scheduler 决策。
 
-### 5. 多 worker JSONL
+此外，TP batch-sharded sampling 增加 `sampler_batch_shard` event，记录 persistent-row ownership、local request shard、per-rank request count 与 logit split；不把 GPU-only gather/sort plan tensors 拉回 CPU。
 
-每个 MRV2 worker 使用独立输出文件：
+每个 MRV2 worker 使用独立 JSONL：
 
 ```text
 <trace-stem>.mrv2.pid<PID>.jsonl
 ```
 
-事件同时包含 global `worker_rank`，避免 TP / PP / PCP worker 争用一个独占 JSONL 路径，并支持后续按 `step_id + worker_rank` 合并。
+事件携带 global `worker_rank`，用于后续按 step / worker 做语义合并。
 
-完整设计见 [`docs/trace_design.md`](docs/trace_design.md)，v0.29 迁移与验证见 [`docs/v029_migration.md`](docs/v029_migration.md)。
+详细设计见 [`docs/trace_design.md`](docs/trace_design.md)，完整 v0.29 迁移与验证见 [`docs/v029_migration.md`](docs/v029_migration.md)。
 
-## v0.29 验证
+## v0.26：从 HOL 收益到 fairness 反例
 
-截至 2026-09-14：
+历史单卡实验得到过三类关键结果：
 
-### Isolated trace CPU suite：22 passed
-
-覆盖 writer/schema、Scheduler events、MRV2 batch semantics、adaptive-verification trimming、CUDA Graph padding、worker rank、TP sampler-shard ownership、step correlation serialization、writer lifecycle 与 no-sync/no-D2H 静态 contract。
-
-### Real Scheduler / IPC CPU suite：8 passed
-
-覆盖 real WAITING → RUNNING prefill、KV allocation failure、request completion、KV-pressure preemption、sync KV-load mock path，以及真实 vLLM MessageQueue 跨进程 transport 与生产 `WorkerProc._execute_worker_rpc()` dispatch。
-
-这证明了当前 CPU contract 与 tested IPC path，**不等于完整 real-model GPU engine、TP/PP/PCP 或真实 KV network transport 已验证**。当前也不做任何 v0.29 Trace overhead 性能宣称。
-
-## HOL blocking：项目最初的问题
-
-在 v0.26 受限 KV pool 实验中，长请求位于 FCFS WAITING 队首但 KV 不足；后面的短请求其实可以容纳，但 strict Scheduler 在队首 allocation failure 后停止扫描，从而产生 head-of-line blocking。
-
-实验因此尝试让 Scheduler 暂时 skip blocked head，继续寻找后续可容纳请求。
-
-## v0.26 实验结果
-
-| 实验 | 结果 | 结论 |
+| 实验 | 观察 | 含义 |
 |---|---:|---|
-| 无界 bypass 三请求 Gate | C TTFT median：**33.250 s → 0.182 s** | HOL 局部收益非常明显 |
-| 无界短请求 burst | blocked head first step：**517 → 587**；TTFT **+10%** | retry-first 不是 starvation bound |
-| bounded 长生命周期 burst | **+3 preemption**；makespan **+1.21%**；throughput **-1.20%**；TTFT Jain **-10.64%** | admission count 无法限制 KV 生命周期 |
-| Scheduler-aligned profile | strict：20 single Decode；bounded：17 single + 1 mixed + 2 dual Decode | 调度策略改变 batch shape / kernel mix |
+| 三请求无界 bypass | C TTFT median `33.250 s -> 0.182 s` | HOL 局部收益明确 |
+| younger burst | blocked head first step `517 -> 587`，TTFT 约 `+10%` | retry-first 不是 starvation bound |
+| bounded 长生命周期反例 | `+3` preemption，makespan `+1.21%`，throughput `-1.20%`，TTFT Jain `-10.64%` | admission count 不能限制 KV 生命周期 |
 
-所以项目没有把 naive bypass 当作最终答案。one-admission / fixed-count bound 只能限制“有多少请求绕过队首”，不能保证这些请求不会长期占用 KV。
+因此项目没有把 bypass 包装成最终方案，而是继续追问：**如何允许闲置 capacity 被 younger work 使用，同时不永久消耗 blocked head 的未来准入机会？**
 
-## Upstream Scheduler Fairness Review
+## Upstream fairness review
 
-对应 upstream 讨论为 vLLM PR #33499：当 WAITING 队首因为 KV block 不足而无法准入时，是否应该 skip 当前 head 并继续扫描后面的请求。
-
-项目将 fairness 问题从 wall-clock benchmark 收缩成 deterministic Scheduler-level reproduction：
+围绕 vLLM PR #33499，把 wall-clock 现象缩成 deterministic Scheduler case：
 
 ```text
 4 allocatable KV blocks
@@ -171,7 +138,7 @@ backfill still owns 1
 => retry-first, but heavy still cannot enter
 ```
 
-这直接区分了：
+这直接证明：
 
 ```text
 queue retry priority
@@ -179,73 +146,51 @@ queue retry priority
 future KV-admission protection
 ```
 
-完整 review 见 [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md)。
+完整过程见 [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md)。
 
 ## Revocable-backfill prototype
 
-当前实验方向是：只有那些**确实在某个 blocked head 后面被准入的 younger work** 才被标记为 revocable backfill。
+当前源码原型只处理窄范围 FCFS / local-KV 场景：
 
-如果未来某一步：
+1. blocked head 进入 protected tracking；
+2. 记录哪些 younger requests **确实在它被 KV-blocked 时被准入**；
+3. 未来若 `free KV + tracked backfill KV` 足以让 protected head 立即满足准入，则可以通过正常 preemption path 撤销该 backfill；
+4. ordinary running request 不能被推断成 reclaim victim；
+5. reclaim 不足以解锁 head 时不能抢占；
+6. backfill 完成或退出后 tracking 必须清理。
 
-```text
-free KV + tracked backfill KV
->= protected head required KV
-```
+源码目前还加有 single concurrent batch、single KV group 等 guard，所以应描述成 **fairness invariant + narrow revocable-backfill prototype**，而不是“解决了 vLLM starvation”。
 
-则可以撤销该 tracked backfill，通过正常 preemption 路径释放 KV，再立刻 retry protected head。
+## 当前验证边界
 
-focused CPU regression 同时要求：
+当前可以声称：
 
-- ordinary running request 不能被错误 reclaim；
-- reclaim 不足以解锁 head 时不能抢占；
-- finished backfill tracking 必须清理；
-- prototype 目前只覆盖 narrow FCFS / local KV-only / single concurrent batch / single KV group 范围。
+- v0.26 已有真实单卡实验，复现 HOL 并量化 bypass 收益与 fairness 反例；
+- fairness 问题已缩成 deterministic Scheduler semantic case；
+- v0.29 Trace 已验证 Scheduler schema/热路径、MRV2 event、TP shard contract、真实 Scheduler CPU 行为、MessageQueue 跨进程 transport 和 WorkerProc RPC dispatch；
+- 当前明确区分 Scheduler decision、runner trimming 与 CUDA Graph padding。
 
-因此应把它描述成 **fairness invariant + narrow revocable-backfill prototype**，而不是“已经解决 vLLM starvation 的最终策略”。
+当前不能声称：
 
-## v0.26 GPU / profiler 证据
+- v0.29 已做完整 real-model GPU end-to-end；
+- v0.29 Trace overhead 已有可靠 GPU 对照；
+- real TP/PP/PCP、Ray 或真实 KV network transport 全部验证；
+- revocable backfill 已被 upstream 接受或是 production-safe 最终方案。
 
-历史单卡实验使用 RTX 2060 Laptop GPU。针对一个真实 Prefill GEMM 的 NCU 采集曾得到：
+## 面试 / Code Review 阅读顺序
 
-| 指标 | 数值 |
-|---|---:|
-| Achieved occupancy | 24.67% |
-| L2 hit rate | 84.01% |
-| SM throughput | 41.68% |
-| DRAM throughput | 25.84% |
-| `math_pipe_throttle` stall | 61.85% |
-| `long_scoreboard` stall | 1.41% |
+1. 本 README：先讲问题与研究路径；
+2. [`docs/trace_design.md`](docs/trace_design.md)：讲 v0.29 数据流；
+3. [`docs/v029_migration.md`](docs/v029_migration.md)：讲 migration、CPU validation 和 remaining gates；
+4. [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md)：讲 fairness invariant；
+5. [`docs/validation.md`](docs/validation.md)：核对证据强弱；
+6. 再进入 `Xiaoda11/vllm` 当前源码分支看实现。
 
-该 counter 只作为 targeted microarchitecture 证据；由于 launch 尚未与单个 mixed Scheduler step 唯一绑定，不用于做严格端到端因果归因。
+源码重点：
 
-## 阅读顺序
-
-面试或代码 review 建议按这个顺序：
-
-| 目标 | 入口 |
-|---|---|
-| 先理解项目问题与当前状态 | 本 README |
-| 理解 v0.29 Trace 数据流 | [`docs/trace_design.md`](docs/trace_design.md) |
-| 看 v0.29 迁移、测试与 remaining gates | [`docs/v029_migration.md`](docs/v029_migration.md) |
-| 看 fairness invariant / upstream 协作 | [`docs/upstream_fairness_review.md`](docs/upstream_fairness_review.md) |
-| 核对证据强弱与边界 | [`docs/validation.md`](docs/validation.md) |
-| 回看 v0.26 GPU 实验复现 | [`REPRODUCING.md`](REPRODUCING.md) |
-| 历史 v0.28 迁移过程 | [`docs/v028_migration.md`](docs/v028_migration.md) |
-
-当前源码重点：
-
-- [`v0.29 trace.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace.py)
-- [`v0.29 trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace_event.py)
-- [`v0.29 scheduler.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/scheduler.py)
-- [`v0.29 model_runner_trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/model_runner_trace_event.py)
-- [`v0.29 GPUModelRunner`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/worker/gpu/model_runner.py)
+- [`trace.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace.py)
+- [`trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/trace_event.py)
+- [`scheduler.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/scheduler.py)
+- [`model_runner_trace_event.py`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/core/sched/model_runner_trace_event.py)
+- [`GPUModelRunner`](https://github.com/Xiaoda11/vllm/blob/port/scheduler-trace-v029/vllm/v1/worker/gpu/model_runner.py)
 - [`revocable-backfill regression`](https://github.com/Xiaoda11/vllm/blob/test/pr33499-revocable-backfill-regression/tests/v1/core/test_scheduler_revocable_backfill_regression.py)
-
-## 证据边界
-
-当前最强的工程结论是：
-
-- v0.26 已有真实单卡实验，证明 HOL 问题以及 naive/bounded bypass 的收益和 fairness 反例；
-- upstream fairness boundary 已被压缩成 deterministic Scheduler semantic case；
-- v0.29 Trace 已建立 Scheduler、MRV2、KV connector、IPC correlation 与 TP sampler-shard 的 CPU contract；
-- v0.29 仍缺 real-model GPU end-to-end、真实多卡和 overhead 对照，所以不会把旧 GPU 数据包装成新版性能结果。
